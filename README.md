@@ -3,6 +3,9 @@
 This provider manages Purelymail domains, users, routing rules, and password
 reset methods through the Purelymail API.
 
+> **Disclaimer:** This is an unofficial provider. It is not provided,
+> supported, or checked by PurelyMail (Add Rabbit LLC).
+
 ## Domain setup
 
 Use `purelymail_ownership_code` to retrieve the complete ownership TXT value.

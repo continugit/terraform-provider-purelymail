@@ -1,5 +1,8 @@
 # Purelymail Provider
 
+> **Disclaimer:** This is an unofficial provider. It is not provided,
+> supported, or checked by PurelyMail (Add Rabbit LLC).
+
 The provider authenticates with a Purelymail API token:
 
 ```hcl
