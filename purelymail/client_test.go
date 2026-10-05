@@ -36,3 +36,18 @@ func TestClientReturnsAPIErrors(t *testing.T) {
 		t.Fatal("expected API error")
 	}
 }
+
+func TestClientReturnsTypedErrorEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"type":"error","code":"invalidToken","message":"Token not valid."}`))
+	}))
+	defer server.Close()
+
+	err := NewClient(server.URL, "secret").Do(context.Background(), "getOwnershipCode", map[string]any{}, &ownershipResponse{})
+	if err == nil {
+		t.Fatal("expected API error")
+	}
+	if got, want := err.Error(), "getOwnershipCode failed (invalidToken): Token not valid."; got != want {
+		t.Fatalf("unexpected error: %q", got)
+	}
+}
