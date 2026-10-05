@@ -18,8 +18,11 @@ type Client struct {
 }
 
 type apiEnvelope struct {
-	Result json.RawMessage `json:"result"`
-	Error  *APIError       `json:"error,omitempty"`
+	Type    string          `json:"type"`
+	Code    string          `json:"code"`
+	Message string          `json:"message"`
+	Result  json.RawMessage `json:"result"`
+	Error   *APIError       `json:"error,omitempty"`
 }
 
 type APIError struct {
@@ -66,6 +69,9 @@ func (c *Client) Do(ctx context.Context, operation string, request any, response
 	var envelope apiEnvelope
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return fmt.Errorf("decode %s response: %w", operation, err)
+	}
+	if envelope.Type == "error" {
+		return fmt.Errorf("%s failed (%s): %s", operation, envelope.Code, envelope.Message)
 	}
 	if envelope.Error != nil {
 		return fmt.Errorf("%s failed (%s): %s", operation, envelope.Error.Code, envelope.Error.Message)

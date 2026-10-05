@@ -3,11 +3,13 @@ package purelymail
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	datasourceschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -20,17 +22,17 @@ import (
 )
 
 type domainModel struct {
-	Name                  types.String     `tfsdk:"name"`
-	AllowAccountReset     types.Bool       `tfsdk:"allow_account_reset"`
-	SymbolicSubaddressing types.Bool       `tfsdk:"symbolic_subaddressing"`
-	IsShared              types.Bool       `tfsdk:"is_shared"`
-	PassesMX              types.Bool       `tfsdk:"passes_mx"`
-	PassesSPF             types.Bool       `tfsdk:"passes_spf"`
-	PassesDKIM            types.Bool       `tfsdk:"passes_dkim"`
-	PassesDMARC           types.Bool       `tfsdk:"passes_dmarc"`
-	RecheckDNS            types.Bool       `tfsdk:"recheck_dns"`
-	Timeouts              timeouts.Value   `tfsdk:"timeouts"`
-	DNSRecords            []dnsRecordModel `tfsdk:"dns_records"`
+	Name                  types.String   `tfsdk:"name"`
+	AllowAccountReset     types.Bool     `tfsdk:"allow_account_reset"`
+	SymbolicSubaddressing types.Bool     `tfsdk:"symbolic_subaddressing"`
+	IsShared              types.Bool     `tfsdk:"is_shared"`
+	PassesMX              types.Bool     `tfsdk:"passes_mx"`
+	PassesSPF             types.Bool     `tfsdk:"passes_spf"`
+	PassesDKIM            types.Bool     `tfsdk:"passes_dkim"`
+	PassesDMARC           types.Bool     `tfsdk:"passes_dmarc"`
+	RecheckDNS            types.Bool     `tfsdk:"recheck_dns"`
+	Timeouts              timeouts.Value `tfsdk:"timeouts"`
+	DNSRecords            types.List     `tfsdk:"dns_records"`
 }
 
 type dnsRecordModel struct {
@@ -39,6 +41,13 @@ type dnsRecordModel struct {
 	Value    types.String `tfsdk:"value"`
 	Priority types.Int64  `tfsdk:"priority"`
 }
+
+var dnsRecordObjectType = types.ObjectType{AttrTypes: map[string]attr.Type{
+	"name":     types.StringType,
+	"type":     types.StringType,
+	"value":    types.StringType,
+	"priority": types.Int64Type,
+}}
 
 func domainSchema(ctx context.Context) resourceschema.Schema {
 	return resourceschema.Schema{Attributes: map[string]resourceschema.Attribute{
@@ -137,15 +146,9 @@ func (r *DomainResource) Create(ctx context.Context, req resource.CreateRequest,
 }
 
 func waitForOwnershipTXT(ctx context.Context, domain string) (bool, error) {
-	resolver := net.DefaultResolver
 	for {
-		records, err := resolver.LookupTXT(ctx, domain)
-		if err == nil {
-			for _, record := range records {
-				if strings.Contains(record, "purelymail_ownership_proof=") {
-					return true, nil
-				}
-			}
+		if ownershipTXTPublished(ctx, domain) {
+			return true, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -157,6 +160,46 @@ func waitForOwnershipTXT(ctx context.Context, domain string) (bool, error) {
 		}
 	}
 }
+
+// ownershipTXTPublished asks each of the domain's authoritative nameservers
+// directly. The local resolver may hold a cached negative answer from before
+// the record was created, which would otherwise stall the wait for the SOA
+// minimum TTL.
+func ownershipTXTPublished(ctx context.Context, domain string) bool {
+	lookupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	nameservers, err := net.DefaultResolver.LookupNS(lookupCtx, domain)
+	if err != nil || len(nameservers) == 0 {
+		return hasOwnershipTXT(lookupCtx, net.DefaultResolver, domain)
+	}
+	for _, ns := range nameservers {
+		address := net.JoinHostPort(strings.TrimSuffix(ns.Host, "."), "53")
+		resolver := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, address)
+			},
+		}
+		if !hasOwnershipTXT(lookupCtx, resolver, domain) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasOwnershipTXT(ctx context.Context, resolver *net.Resolver, domain string) bool {
+	records, err := resolver.LookupTXT(ctx, domain)
+	if err != nil {
+		return false
+	}
+	for _, record := range records {
+		if strings.Contains(record, "purelymail_ownership_proof=") {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *DomainResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state domainModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -194,7 +237,7 @@ func (r *DomainResource) setDNSRecords(ctx context.Context, state *domainModel) 
 		return err
 	}
 	domain := state.Name.ValueString()
-	state.DNSRecords = []dnsRecordModel{
+	records := []dnsRecordModel{
 		{Name: types.StringValue(domain), Type: types.StringValue("TXT"), Value: types.StringValue(ownership.Code), Priority: types.Int64Null()},
 		{Name: types.StringValue(domain), Type: types.StringValue("MX"), Value: types.StringValue("mailserver.purelymail.com"), Priority: types.Int64Value(50)},
 		{Name: types.StringValue(domain), Type: types.StringValue("TXT"), Value: types.StringValue("v=spf1 include:_spf.purelymail.com ~all"), Priority: types.Int64Null()},
@@ -203,6 +246,11 @@ func (r *DomainResource) setDNSRecords(ctx context.Context, state *domainModel) 
 		{Name: types.StringValue("purelymail3._domainkey." + domain), Type: types.StringValue("CNAME"), Value: types.StringValue("key3.dkimroot.purelymail.com"), Priority: types.Int64Null()},
 		{Name: types.StringValue("_dmarc." + domain), Type: types.StringValue("CNAME"), Value: types.StringValue("dmarcroot.purelymail.com"), Priority: types.Int64Null()},
 	}
+	list, diags := types.ListValueFrom(ctx, dnsRecordObjectType, records)
+	if diags.HasError() {
+		return fmt.Errorf("build dns_records: %s", diags[0].Detail())
+	}
+	state.DNSRecords = list
 	return nil
 }
 
